@@ -7,6 +7,7 @@
 
 #include "hcsr04.h"
 
+//Dejar las variables propias de la libreria independientes del main,c
 typedef union{
 	struct{
 		uint8_t bit7 : 1;
@@ -27,13 +28,14 @@ typedef union{
 #define TRIGGERDONE			hcFlags.bits.bit1
 
 #define NEWMEASURE			hcFlags.bits.bit3
+#define ECHOTIMEOUT			hcFlags.bits.bit4
 
+#define IS10MS				hcFlags.bits.bit6
 #define IS100MS				hcFlags.bits.bit7
 
 //Definición de variables
 _uFlag hcFlags;
 uint8_t ISDISTANCE = 0;
-uint8_t CLRFLAGS = 0;
 
 void initHcSr04()
 {
@@ -44,23 +46,25 @@ void initHcSr04()
 void hcSr04Task(void (*hcsr04)(), uint8_t *flags) //
 {
 	hcFlags.bytes = *flags; //tomamos los valores 
-	//ejecución continua de la función
-	
-	triggerTask(IS100MS);
-	
-	if(CLRFLAGS)
-	{
-		OKDISTANCE = 0; //hacemos 0 aca para un control correcto
-		TRIGGERDONE = 0;
-		CLRFLAGS = 0;
-	}
-	
+	//ejecución continua de la función			
+
 	//Sistema de control
 	if(OKDISTANCE && TRIGGERDONE)
 	{
+		//RESETFLAGS = 0;
+		OKDISTANCE = 0;
+		TRIGGERDONE = 0;
+		//RESETFLAGS = 0;
 		ISDISTANCE=1; 
-	}	
-	
+	}
+	if (ECHOTIMEOUT)
+	{
+		ECHOTIMEOUT=0;
+		TRIGGERDONE=0;
+	}
+
+	triggerTask(IS100MS);
+
 	*flags = hcFlags.bytes;	//guardamos los valores 
 	hcsr04(); //ejecución de la función
 }
@@ -71,18 +75,15 @@ void triggerTask(uint8_t is100ms)
 		NEWMEASURE=1;
 }
 
-uint32_t getDistance(uint32_t startTime, uint32_t endTime)
+void getDistance(uint32_t *distance, uint32_t startTime, uint32_t endTime)
 {
-	uint32_t distance = 0;
+	//uint32_t distance = 0;
 
 	if(ISDISTANCE)
 	{
-		//Utilizamos estas 2 banderas para poder setear en distintos momentos 
+		////Utilizamos estas 2 banderas para poder setear en distintos momentos 
 		ISDISTANCE = 0;
-		CLRFLAGS = 1;
-		distance = (endTime - startTime)/2; //distancia [cm]
-		return distance;
-	}
-	return 0;	
+		*distance = (endTime - startTime)/2; //distancia [cm]
+	}	
 }
 

@@ -86,7 +86,8 @@ typedef enum{
 	ONTRIGGER,
 	OFFTRIGGER,
 	UPFLANK,
-	DOWNFLANK
+	DOWNFLANK,
+	IDLE
 }_eDistance;
 
 /**
@@ -152,11 +153,11 @@ typedef struct{
 #define TRIGGERDONE			flags.bits.bit1
 
 #define NEWMEASURE			flags.bits.bit3
+#define ECHOTIMEOUT			flags.bits.bit4
 
 #define IS10MS				flags.bits.bit6
 #define IS100MS				flags.bits.bit7
 
-#define IDLE				-1
 
 
 
@@ -313,6 +314,7 @@ uint8_t time100ms = 10;
 
 
 //uint8_t triggerDone = 0;
+uint32_t distance = 0;
 uint32_t echoTimeout = 0;
 _eDistance hcSr04Modes;
 
@@ -495,11 +497,10 @@ void decodeCommand(_sRx *dataRx, _sTx *dataTx)
             putByteOnTx(dataTx, dataTx->chk);
         break;
         case GETDISTANCE:
-			myWord.ui32 = getDistance(startTime, endTime); //Cast para indicar que trate la union como uint_8t
+			myWord.ui32 = distance; //Cast para indicar que trate la union como uint_8t
 			putHeaderOnTx(dataTx, GETDISTANCE, 5);
 			putByteOnTx(dataTx, myWord.ui8[0] );
 			putByteOnTx(dataTx, myWord.ui8[1] );
-			//No necesarios, numero mayor  es 400
 			putByteOnTx(dataTx, myWord.ui8[2] );
 			putByteOnTx(dataTx, myWord.ui8[3] );
 			
@@ -589,11 +590,9 @@ void initTimer1()
 	//Configuraci?n para funcionamiento normal - fclk/8 -> 2Mhz - 0,5uS
 	TCNT1 = 0;
 	TCCR1A = 0;
-	//TCCR1B = 0xC2; //Timer en 2mHz con preescaler de 8, y tambien se configura para esperar un flanco ascendente en el ICP1
 	TCCR1B=(1<<ICNC1) | (1<<ICES1) | (0<<CS12) | (1<<CS11) | (0<<CS10); //Activamos la cancelacion de ruido y el preescaler a 8
 	TIMSK1 = (1 << OCIE1B) | (1 << ICIE1); //Habilitamos la interrupci?n por captura de entrada ICIE1
 	TIFR1 = TIFR1; //Hacemos 0 las banderas
-	//OCR1B += 20; //Valor inicial ser?a de 10us 
 }
 
 void do10ms()
@@ -620,33 +619,51 @@ void do100ms()
 	}
 }
 
-void hcsr04Control(){
+void hcsr04Control(){	
+
 	if(NEWMEASURE)
+	{
+		NEWMEASURE=0;
 		hcSr04Modes=ONTRIGGER;
-		
+	}
+	
 	switch(hcSr04Modes){
 		case ONTRIGGER://ejecucion cada 100ms y que no haya ocurrido un trigger
 			PORTB |= (1<<TRIG); //Comenzamos el pulso
-			OCR1B += 20; //Espera de 10us en alto
+			OCR1B = TCNT1 + 20; //Espera de 10us en alto
+			echoTimeout=millis();
+			
+			hcSr04Modes=IDLE;
 			break;	
 		case OFFTRIGGER:
 			TRIGGERDONE = 1; //Control de que no salte de nuevo el trigger
 			PORTB &= ~(1<<TRIG); //Finalizamos el pulso		
+			
+			hcSr04Modes=IDLE;
 			break;
 		case UPFLANK:
+			//PORTB &= ~(1<<LEDBUILTIN); //ledOff
 			TCCR1B &= ~(1 << ICES1);  // Configurar a 0 valor de ICES1 para flanco descendente
+			PORTB &= ~(1<<LEDBUILTIN);
+			hcSr04Modes=IDLE;
 			break;
 		case DOWNFLANK:
 			OKDISTANCE = 1;
 			TCCR1B |= (1 << ICES1);   // Resetear para proximo flanco ascendente
-			PORTB |= (1<<LEDBUILTIN); //ledOn	
+			PORTB |= (1<<LEDBUILTIN); //ledOn
+			hcSr04Modes=IDLE;
+			
 			break;
-		default:
-			return;
+		case IDLE:
+			break;
+	}	
+	
+	if((echoTimeout-millis())>100)
+	{
+		ECHOTIMEOUT=1;
+		return;
 	}
-	hcSr04Modes=IDLE;
 }
-
 
 
 //INTERRUPTS
@@ -681,8 +698,9 @@ ISR(TIMER1_CAPT_vect){
 		hcSr04Modes=UPFLANK;
 		startTime = ICR1; //guardamos el tiempo en ese instante
 	}
-	if (TCCR1B & (0 << ICES1)) // Flanco descendente (fin del eco)
-	{  
+	//if (TCCR1B | ~(1 << ICES1)) // Flanco descendente (fin del eco)
+	else
+	{  	
 		hcSr04Modes=DOWNFLANK;	
 		endTime = ICR1;
 	}
@@ -724,6 +742,7 @@ int main()
 	initUSART0();
 	
 	initHcSr04(); //Inicializamos el sensor
+	hcSr04Modes = IDLE;
 	
 	//Configuracion de temporizadores
 	delayConfig(&generalTime,GENERALTIME);
@@ -740,7 +759,7 @@ int main()
 		do100ms(); //función de librería
 				
 		hcSr04Task(hcsr04Control, (uint8_t*)&flags);
-		
+		getDistance(&distance, startTime, endTime);
         //CONEXIONES SERIAL Y WIFI
         serialTask((_sRx *)&dataRx, &dataTx); //serialTask -> conexion serial
     }
