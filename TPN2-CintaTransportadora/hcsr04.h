@@ -1,0 +1,22 @@
+/*
+ * hcsr04.h
+ *
+ * Created: 6/4/2025 16:07:48
+ *  Author: gonza
+ */ 
+#include <stddef.h>
+#include <stdint.h>
+
+#ifndef HCSR04_H_
+#define HCSR04_H_
+
+void initHcSr04();
+
+void hcSr04Task(void (*hcsr04)(), uint8_t *flags);
+
+void triggerTask(uint8_t is100ms);
+
+uint32_t getDistance(uint32_t startTime, uint32_t endTime);
+
+
+#endif /* HCSR04_H_ */

@@ -7,6 +7,7 @@
  *
  * |   Fecha    | Descripcion                                    |
  * |:----------:|:-----------------------------------------------|
+ * |:06/04/2025:|:Andando HCSR04---------------------------------|
 
 */
 
@@ -15,24 +16,11 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/pgmspace.h>
+
+#include "hcsr04.h" //myLibrary
 /* END Includes --------------------------------------------------------------*/
 
-
 /* typedef -------------------------------------------------------------------*/
-/**
- * @brief Tipo de datos de puntero a funci?n, sirve para declarar los distintos callbacks.-
- * 
- */
-typedef void(*ptrFunc)(void *param);
-
-//ENUMERACIONES
-typedef enum{
-    BUTTON_DOWN,
-    BUTTON_UP,
-    BUTTON_RISING,
-    BUTTON_FALLING
-}_eButtonState;
-
 typedef union{
 	struct{
 		uint8_t bit7 : 1;
@@ -93,24 +81,13 @@ typedef enum{
     PAYLOAD
 }_eDecode;
 
-/**
- * @brief Enumeracion de los estados de los diferentes estados de los botones, como tengo una configuracion PullDown los coloqu? de tal forma que me quede el valor de NOT_PRESSED = 0  y PRESSED = 1
-*/
-typedef enum{
-    PRESSED,
-    NOT_PRESSED,
-    NO_EVENT
-}_eEvent;
 
-//ESTRUCTURAS
-typedef struct
-{
-    _eButtonState   currentState;
-    _eEvent         stateInput;
-    ptrFunc         callBack;
-    uint32_t        timePressed;
-    uint32_t        timeDiff;
-}_sButton;
+typedef enum{
+	ONTRIGGER,
+	OFFTRIGGER,
+	UPFLANK,
+	DOWNFLANK
+}_eDistance;
 
 /**
  * @brief Enumeraci?n de los comandos del protocolo
@@ -171,7 +148,17 @@ typedef struct{
 
 //Banderas - flags
 #define RESETFLAGS          flags.bytes 
-#define ISCOMAND            flags.bits.bit0
+#define OKDISTANCE			flags.bits.bit0
+#define TRIGGERDONE			flags.bits.bit1
+
+#define NEWMEASURE			flags.bits.bit3
+
+#define IS10MS				flags.bits.bit6
+#define IS100MS				flags.bits.bit7
+
+#define IDLE				-1
+
+
 
 /* END define ----------------------------------------------------------------*/
 
@@ -247,13 +234,6 @@ void decodeCommand(_sRx *dataRx, _sTx *dataTx);
  */
 void aliveAutoTask(_delay_t *aliveAutoTime);
 
-/**
- * @brief Funci?n encargada de medir tiempos
-*/
-void do10ms();
-
-void do100ms();
-
 //HEARTBEAT
 /**
  * @brief Hearbeat, indica el funcionamiento del sistema
@@ -288,11 +268,9 @@ uint8_t delayRead(_delay_t *delay);
 void delayWrite(_delay_t *delay, uint16_t interval);
 
 
-void getDistance();
+uint32_t millis(); //Contador de milisegundos
 
-void triggerTask();
-
-uint32_t millis(); //Obtener los milisegundos transcurridos correctamente
+void do10ms();
 
 void initUSART0();
 void initTimer0();
@@ -305,12 +283,10 @@ void initTimer1();
 const char firmware[] = "EX100923v01\n";
 
 //MASCARAS
-const uint8_t irMask = 0x01;
-
 uint32_t heartBeatMask[] = {0x55555555, 0x1, 0x2010080, 0x5F, 0x5, 0x28140A00, 0x15F, 0x15, 0x2A150A08, 0x55F}; //IDLE, MODO1, MODO1(1-5), MODO1ON, MODO2, MODO2(1-5), MODO2ON, MODO3, MODO3(1-5), MODO3ON
 
 //BANDERAS
-_uFlag  flags;
+volatile _uFlag  flags; //declaración de esta forma debido a su uso en la interrupción
 
 //COMUNICACION SERIAL - WIFI
 _uWord myWord;
@@ -325,32 +301,22 @@ uint8_t buffTx[TXBUFSIZE];
 
 uint8_t globalIndex, index2;
 
-uint8_t is10ms = 0;
-uint8_t time10ms = 10;
-uint8_t	is100ms = 0;
-uint8_t time100ms = 10;
-
-//A?ADIDOS ESTE CODIGO
-
 _delay_t generalTime;
 
 volatile uint32_t MillisCounter;
 
-
 volatile uint32_t startTime = 0;
 volatile uint32_t endTime = 0;
-volatile uint32_t echoTimeout = 0;
-volatile uint8_t is10us = 0; //bandera volatile por uso en interrupci?n
-volatile uint8_t okDistance = 0; //bandera volatile por uso en interrupci?n
-volatile uint8_t triggerDone = 0; //bandera volatile por uso en interrupci?n, acctiva luego de hacer trigger
 
-//uint8_t doTrigger = 0; //bandera para hacer el trigger
+volatile uint8_t time10ms = 10;
+uint8_t time100ms = 10;
 
-uint32_t distance = 0; //Almacen de la distancia
 
+//uint8_t triggerDone = 0;
+uint32_t echoTimeout = 0;
+_eDistance hcSr04Modes;
 
 /* END Global variables ------------------------------------------------------*/
-
 
 /* Function prototypes user code ----------------------------------------------*/
 
@@ -529,7 +495,7 @@ void decodeCommand(_sRx *dataRx, _sTx *dataTx)
             putByteOnTx(dataTx, dataTx->chk);
         break;
         case GETDISTANCE:
-			myWord.ui32 = distance;
+			myWord.ui32 = getDistance(startTime, endTime); //Cast para indicar que trate la union como uint_8t
 			putHeaderOnTx(dataTx, GETDISTANCE, 5);
 			putByteOnTx(dataTx, myWord.ui8[0] );
 			putByteOnTx(dataTx, myWord.ui8[1] );
@@ -563,31 +529,7 @@ void hearbeatTask(uint8_t index)
 	times &= 31; //control de times
 }
 
-void do10ms()
-{
-	if (time10ms == 0)
-	{
-		is10ms = 1;
-		time10ms = 10;
-	}
-}
-
-void do100ms() 
-{
-	if(time100ms == 0)//reiniciamos el valor
-	{ 
-		is100ms = 1; //Activamos la bandera del pasode 100ms
-		time100ms = 10;
-		return;
-	}
-	if(is10ms==1)
-	{
-		time100ms--;
-		is100ms = 0;//limpiamos la bandera de 100ms
-		is10ms = 0;//limpiamos la bandera de 10ms
-	}
-}
-
+//DELAYS
 void delayConfig(_delay_t *delay, uint16_t  interval){
 	delay->interval =interval;
 	delay->isRunnig = 0;
@@ -621,30 +563,9 @@ uint32_t millis()
 	return savedMillis;
 }
 
-void getDistance()
+void initUSART0()//USART -> 115200 bd
 {
-	if(triggerDone && okDistance) //ofDistance control para si ya se guardaron los valores de endtime y starttime
-	{ 
-		distance = (endTime - startTime)/2; //distancia [cm]
-		triggerDone = 0;
-		okDistance = 0; //Preparamos para otra medida
-	}
-	if((millis() - echoTimeout) > 100) //Pasaron mas de 100ms y no se recibe el echo
-		triggerDone = 0;
-}
-
-void triggerTask(){
-	if(is100ms && !triggerDone) //ejecuci?n cada 100ms y que no haya ocurrido un trigger
-	{
-		PORTB |= (1<<TRIG); //Comenzamos el pulso
-		OCR1B += 20; //Espera de 10us en alto
-		echoTimeout = millis();
-	}
-}
-
-void initUSART0()
-{
-	//USART -> 115200 bd
+	
 	UCSR0A = 0xFE;
 	UCSR0B = (1 << RXCIE0) | (1 << RXEN0) | (1 << TXEN0);
 	UCSR0C = 0x06;
@@ -659,9 +580,7 @@ void initTimer0()
 	TCCR0B = 0b00000011; //Seteo del prescaler
 	TCNT0 = 0x00;
 	TIFR0 = 0x07;
-	//OCR0A = 125;
 	OCR0A = 249; //Comienza en 0 
-	//TIMSK0 |= (1 << OCIE0A);
 	TIMSK0 = 0x02;
 }
 
@@ -670,14 +589,65 @@ void initTimer1()
 	//Configuraci?n para funcionamiento normal - fclk/8 -> 2Mhz - 0,5uS
 	TCNT1 = 0;
 	TCCR1A = 0;
-	
 	//TCCR1B = 0xC2; //Timer en 2mHz con preescaler de 8, y tambien se configura para esperar un flanco ascendente en el ICP1
 	TCCR1B=(1<<ICNC1) | (1<<ICES1) | (0<<CS12) | (1<<CS11) | (0<<CS10); //Activamos la cancelacion de ruido y el preescaler a 8
 	TIMSK1 = (1 << OCIE1B) | (1 << ICIE1); //Habilitamos la interrupci?n por captura de entrada ICIE1
-	
 	TIFR1 = TIFR1; //Hacemos 0 las banderas
 	//OCR1B += 20; //Valor inicial ser?a de 10us 
 }
+
+void do10ms()
+{
+	if (time10ms == 0)
+	{
+		IS10MS = 1;
+		time10ms = 10;
+	}
+}
+
+void do100ms()
+{
+	if(time100ms == 0)//reiniciamos el valor
+	{
+		IS100MS = 1; //Activamos la bandera del pasode 100ms
+		time100ms = 10;
+	}
+	if(IS10MS==1)
+	{
+		time100ms--;
+		IS10MS = 0;//limpiamos la bandera de 10ms
+		IS100MS = 0;//limpiamos la bandera de 100ms
+	}
+}
+
+void hcsr04Control(){
+	if(NEWMEASURE)
+		hcSr04Modes=ONTRIGGER;
+		
+	switch(hcSr04Modes){
+		case ONTRIGGER://ejecucion cada 100ms y que no haya ocurrido un trigger
+			PORTB |= (1<<TRIG); //Comenzamos el pulso
+			OCR1B += 20; //Espera de 10us en alto
+			break;	
+		case OFFTRIGGER:
+			TRIGGERDONE = 1; //Control de que no salte de nuevo el trigger
+			PORTB &= ~(1<<TRIG); //Finalizamos el pulso		
+			break;
+		case UPFLANK:
+			TCCR1B &= ~(1 << ICES1);  // Configurar a 0 valor de ICES1 para flanco descendente
+			break;
+		case DOWNFLANK:
+			OKDISTANCE = 1;
+			TCCR1B |= (1 << ICES1);   // Resetear para proximo flanco ascendente
+			PORTB |= (1<<LEDBUILTIN); //ledOn	
+			break;
+		default:
+			return;
+	}
+	hcSr04Modes=IDLE;
+}
+
+
 
 //INTERRUPTS
 // Rutina de servicio de interrupci?n (ISR) para recepci?n USART
@@ -694,10 +664,10 @@ ISR(TIMER0_COMPA_vect) // Vector 15 (0x001C)
 	time10ms--;
 }
 
-//Interrupci?n cada 10us
-ISR(TIMER1_COMPB_vect){	
-	triggerDone = 1; //Bandera para seguir adelante con la ejecuci?n del codigo
-	PORTB &= ~(1<<TRIG); //Finalizamos el pulso
+//Interrupcion cada 10us
+ISR(TIMER1_COMPB_vect)
+{		
+	hcSr04Modes=OFFTRIGGER; //Bandera para seguir adelante con la ejecuci?n del codigo
 }
 
 /*
@@ -708,14 +678,13 @@ ICES = 1 -> rising (positive) edge
 ISR(TIMER1_CAPT_vect){
 	if (TCCR1B & (1 << ICES1)) // Pin es 1, flanco ascendente inicio del eco
 	{ 
+		hcSr04Modes=UPFLANK;
 		startTime = ICR1; //guardamos el tiempo en ese instante
-		TCCR1B &= ~(1 << ICES1);  // Configurar a 0 valor de ICES1 para flanco descendente
 	}
-	else // Flanco descendente (fin del eco)
+	if (TCCR1B & (0 << ICES1)) // Flanco descendente (fin del eco)
 	{  
+		hcSr04Modes=DOWNFLANK;	
 		endTime = ICR1;
-		okDistance = 1; // bandera
-		TCCR1B |= (1 << ICES1);   // Resetear para pr?ximo flanco ascendente
 	}
 }
 
@@ -730,25 +699,17 @@ int main()
     dataRx.indexW = 0;
     dataRx.header = HEADER_U;
     dataRx.mask = RXBUFSIZE - 1;
-
+	dataRx.isComannd = 0;
+	
     dataTx.buff = buffTx;
     dataTx.indexR = 0;
     dataTx.indexW = 0;
     dataTx.mask = TXBUFSIZE -1;
     RESETFLAGS = 0;
 	
-	dataRx.isComannd = 0;
-	////Inicializamos banderas
-	//is10ms = 0;
-	//is100ms = 0;
-	////Inicializamos contadores
-	//time10ms = 10;	
-	//time100ms = 10;
-	
 	MillisCounter = 0;
 	
 	//Inicializamos los pines salida/entrada
-	
 	DDRB |= (1<<LEDBUILTIN); //Seteo del led como salida	
 	DDRB |= (1<<TRIG) | (0<<ECHO);//Definimos el trig como salida y el echo como entrada
 	
@@ -756,12 +717,16 @@ int main()
 	PORTB &= ~(1<<LEDBUILTIN); //ledOff
 	//PORTB |= (1<<LEDBUILTIN); //ledOn
 	PORTB &= ~(1<<TRIG);//Inicializamos con el trigger apagado
-	
-	
+
 	//Inicializamos interrupciones
 	initTimer0();
 	initTimer1();
 	initUSART0();
+	
+	initHcSr04(); //Inicializamos el sensor
+	
+	//Configuracion de temporizadores
+	delayConfig(&generalTime,GENERALTIME);
 	
 	sei();
 /* Local variables -----------------------------------------------------------*/
@@ -769,20 +734,15 @@ int main()
 /* END Local variables -------------------------------------------------------*/
 
 
-/* User code -----------------------------------------------------------------*/
-
-	//Configuracion de temporizadores
-	delayConfig(&generalTime,GENERALTIME);
-	
+/* User code -----------------------------------------------------------------*/	
     while(1){
 		do10ms();
-		do100ms();	
-		//on100ms();
-		triggerTask();
-		getDistance();
+		do100ms(); //función de librería
+				
+		hcSr04Task(hcsr04Control, (uint8_t*)&flags);
+		
         //CONEXIONES SERIAL Y WIFI
-        serialTask((_sRx *)&dataRx,&dataTx); //serialTask -> conexion serial
+        serialTask((_sRx *)&dataRx, &dataTx); //serialTask -> conexion serial
     }
-
 /* END User code -------------------------------------------------------------*/
 }
