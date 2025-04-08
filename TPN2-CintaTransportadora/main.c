@@ -154,7 +154,6 @@ typedef struct{
 
 #define NEWMEASURE			flags.bits.bit3
 #define ECHOTIMEOUT			flags.bits.bit4
-
 #define IS10MS				flags.bits.bit6
 #define IS100MS				flags.bits.bit7
 
@@ -276,6 +275,7 @@ void do10ms();
 void initUSART0();
 void initTimer0();
 void initTimer1();
+void initPCINT0();
 /* END Function prototypes ---------------------------------------------------*/
 
 /* Global variables ----------------------------------------------------------*/
@@ -338,7 +338,6 @@ void serialTask(_sRx *dataRx, _sTx *dataTx)
 			dataRx->timeOut--;
 			if(!dataRx->timeOut)
 			dataRx->header = HEADER_U;
-			//PORTB |= (1<<LEDBUILTIN); //LedOn
 		}
 	}
 	
@@ -566,7 +565,6 @@ uint32_t millis()
 
 void initUSART0()//USART -> 115200 bd
 {
-	
 	UCSR0A = 0xFE;
 	UCSR0B = (1 << RXCIE0) | (1 << RXEN0) | (1 << TXEN0);
 	UCSR0C = 0x06;
@@ -595,6 +593,15 @@ void initTimer1()
 	TIFR1 = TIFR1; //Hacemos 0 las banderas
 }
 
+void initPCINT0()
+{
+	DDRB &= ~((1<<PORTB2));
+	PORTB |= (1<<PORTB2);
+	PCIFR |= (1<<PCIF0);
+	PCICR |= (1 << PCIE0); // Habilita interrupciones del grupo PCINT0 (PB0 - PB7)
+	PCMSK0 |= (1<< PCINT2); //Habilita la interrupción para el pin PB2
+}
+
 void do10ms()
 {
 	if (time10ms == 0)
@@ -620,44 +627,35 @@ void do100ms()
 }
 
 void hcsr04Control(){	
-
 	if(NEWMEASURE)
 	{
 		NEWMEASURE=0;
 		hcSr04Modes=ONTRIGGER;
 	}
-	
 	switch(hcSr04Modes){
 		case ONTRIGGER://ejecucion cada 100ms y que no haya ocurrido un trigger
 			PORTB |= (1<<TRIG); //Comenzamos el pulso
 			OCR1B = TCNT1 + 20; //Espera de 10us en alto
 			echoTimeout=millis();
-			
 			hcSr04Modes=IDLE;
 			break;	
 		case OFFTRIGGER:
 			TRIGGERDONE = 1; //Control de que no salte de nuevo el trigger
 			PORTB &= ~(1<<TRIG); //Finalizamos el pulso		
-			
 			hcSr04Modes=IDLE;
 			break;
 		case UPFLANK:
-			//PORTB &= ~(1<<LEDBUILTIN); //ledOff
 			TCCR1B &= ~(1 << ICES1);  // Configurar a 0 valor de ICES1 para flanco descendente
-			PORTB &= ~(1<<LEDBUILTIN);
 			hcSr04Modes=IDLE;
 			break;
 		case DOWNFLANK:
 			OKDISTANCE = 1;
 			TCCR1B |= (1 << ICES1);   // Resetear para proximo flanco ascendente
-			PORTB |= (1<<LEDBUILTIN); //ledOn
 			hcSr04Modes=IDLE;
-			
 			break;
 		case IDLE:
 			break;
 	}	
-	
 	if((echoTimeout-millis())>100)
 	{
 		ECHOTIMEOUT=1;
@@ -687,24 +685,30 @@ ISR(TIMER1_COMPB_vect)
 	hcSr04Modes=OFFTRIGGER; //Bandera para seguir adelante con la ejecuci?n del codigo
 }
 
+ISR(PCINT0_vect)
+{
+	if (PINB & (1<<PINB2)) // Flanco ascendente (inicio echo)
+	{
+		hcSr04Modes=UPFLANK;
+		startTime = TCNT1; //guardamos el tiempo en ese instante
+	}
+	else // Flanco descendente (final eco)
+	{
+		PORTB |= (1<<LEDBUILTIN); //ledOn
+		hcSr04Modes=DOWNFLANK;
+		endTime = TCNT1;
+	}
+}
+
 /*
 ICES = 0 -> falling (negative) edge 
 ICES = 1 -> rising (positive) edge
 */
 //Captura del flanco 
 ISR(TIMER1_CAPT_vect){
-	if (TCCR1B & (1 << ICES1)) // Pin es 1, flanco ascendente inicio del eco
-	{ 
-		hcSr04Modes=UPFLANK;
-		startTime = ICR1; //guardamos el tiempo en ese instante
-	}
-	//if (TCCR1B | ~(1 << ICES1)) // Flanco descendente (fin del eco)
-	else
-	{  	
-		hcSr04Modes=DOWNFLANK;	
-		endTime = ICR1;
-	}
 }
+
+
 
 /* END Function prototypes user code ------------------------------------------*/
 
@@ -740,6 +744,7 @@ int main()
 	initTimer0();
 	initTimer1();
 	initUSART0();
+	initPCINT0();
 	
 	initHcSr04(); //Inicializamos el sensor
 	hcSr04Modes = IDLE;

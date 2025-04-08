@@ -45,16 +45,13 @@ void initHcSr04()
 
 void hcSr04Task(void (*hcsr04)(), uint8_t *flags) //
 {
-	hcFlags.bytes = *flags; //tomamos los valores 
-	//ejecución continua de la función			
+	hcFlags.bytes = *flags; //tomamos los valores 			
 
 	//Sistema de control
 	if(OKDISTANCE && TRIGGERDONE)
 	{
-		//RESETFLAGS = 0;
 		OKDISTANCE = 0;
 		TRIGGERDONE = 0;
-		//RESETFLAGS = 0;
 		ISDISTANCE=1; 
 	}
 	if (ECHOTIMEOUT)
@@ -77,8 +74,6 @@ void triggerTask(uint8_t is100ms)
 
 void getDistance(uint32_t *distance, uint32_t startTime, uint32_t endTime)
 {
-	//uint32_t distance = 0;
-
 	if(ISDISTANCE)
 	{
 		////Utilizamos estas 2 banderas para poder setear en distintos momentos 

@@ -7,12 +7,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <avr/io.h>
-#include <avr/interrupt.h>
-#include <avr/pgmspace.h>
-#define LEDBUILTIN			PB5
-
-
 #ifndef HCSR04_H_
 #define HCSR04_H_
 
